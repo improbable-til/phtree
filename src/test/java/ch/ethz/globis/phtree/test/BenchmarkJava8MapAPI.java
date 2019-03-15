@@ -10,6 +10,7 @@ import ch.ethz.globis.phtree.PhTree;
 import ch.ethz.globis.phtree.test.util.TestSuper;
 import ch.ethz.globis.phtree.v13.PhTree13;
 import ch.ethz.globis.phtree.v16.PhTree16;
+import ch.ethz.globis.phtree.v16ld.PhTree16LD;
 
 import java.util.Arrays;
 import java.util.Random;
@@ -47,16 +48,24 @@ public class BenchmarkJava8MapAPI extends TestSuper {
 				new Scenario("PHTree16-GP: ", () -> new PhTree16<>(DIMS), BenchmarkJava8MapAPI::actionGetPut);
 		Scenario s16comp =
 				new Scenario("PHTree16-CO: ", () -> new PhTree16<>(DIMS), BenchmarkJava8MapAPI::actionCompute);
+		Scenario s16ldgetPut =
+				new Scenario("PHTree16ld-GP: ", () -> new PhTree16LD<>(DIMS), BenchmarkJava8MapAPI::actionGetPut);
+		Scenario s16ldcomp =
+				new Scenario("PHTree16ld-CO: ", () -> new PhTree16LD<>(DIMS), BenchmarkJava8MapAPI::actionCompute);
 
 		test3(data, s13getPut);
 		test3(data, s13comp);
 		test3(data, s16getPut);
 		test3(data, s16comp);
+		test3(data, s16ldgetPut);
+		test3(data, s16ldcomp);
 
 		test3(data, s13getPut);
 		test3(data, s13comp);
 		test3(data, s16getPut);
 		test3(data, s16comp);
+		test3(data, s16ldgetPut);
+		test3(data, s16ldcomp);
 	}
 
 	private static void actionGetPut(PhTree<int[]> tree, long[] key) {

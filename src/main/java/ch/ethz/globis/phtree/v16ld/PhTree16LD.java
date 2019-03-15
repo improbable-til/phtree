@@ -1,0 +1,701 @@
+/*
+ * Copyright 2011-2016 ETH Zurich. All Rights Reserved.
+ * Copyright 2016-2018 Tilmann Zäschke. All Rights Reserved.
+ * Copyright 2019 Improbable. All rights reserved.
+ *
+ * This file is part of the PH-Tree project.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package ch.ethz.globis.phtree.v16ld;
+
+import ch.ethz.globis.phtree.*;
+import ch.ethz.globis.phtree.util.PhMapper;
+import ch.ethz.globis.phtree.util.PhTreeStats;
+import ch.ethz.globis.phtree.util.StringBuilderLn;
+import ch.ethz.globis.phtree.util.unsynced.LongArrayPool;
+import ch.ethz.globis.phtree.util.unsynced.ObjectPool;
+import ch.ethz.globis.phtree.v16ld.Node.BSTEntry;
+import ch.ethz.globis.phtree.v16ld.bst.BSTIteratorAll;
+import ch.ethz.globis.phtree.v16ld.bst.BSTPool;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Objects;
+import java.util.function.BiFunction;
+import java.util.function.Function;
+
+import static ch.ethz.globis.phtree.PhTreeHelper.*;
+
+/**
+ * n-dimensional index (quad-/oct-/n-tree).
+ * 
+ * Version 16: BST-only, directly integrated with Node
+ * 
+ * Version 15: BST-Only
+ * 
+ * Version 14: Removed NT (nested tree) and replaced it with hierarchical table.
+ * 
+ * Version 13: Based on Version 11. Some optimizations, for example store HC-Pos in postFix.
+ * 
+ * Version 12: This was an attempt at a persistent version.
+ * 
+ * Version 11: Use of NtTree for Nodes
+ *             'null' values are replaced by NULL, this allows removal of AHC-exists bitmap
+ *             Removal of recursion (and reimplementation) for get/insert/delete/update 
+ * 
+ * Version 10b: Moved infix into parent node.
+ * 
+ * Version 10: Store sub-nodes and postfixes in a common structure (one list/HC of key, one array)
+ *             Advantages: much easier iteration through node, replacement of sub/post during 
+ *             updates w/o bit shifting, can check infix without accessing sub-node (good for I/O).
+ * 
+ * Version 8b: Extended array pooling to all arrays
+ * 
+ * Version 8: Use 64bit depth everywhere. This should simplify a number of methods, especially
+ *            regarding negative values.
+ * 
+ * Version 7: Uses PhEntry to store/return keys.
+ *
+ * Version 5: moved postCnt/subCnt into node.
+ *
+ * Version 4: Using long[] instead of int[]
+ *
+ * Version 3: This includes values for each key.
+ *
+ * Storage:
+ * - classic: One node per combination of bits. Unused nodes can be cut off.
+ * - use prefix-truncation: a node may contain a series of unique bit combinations
+ *
+ * Hypercube: expanded byte array that contains 2^DIM references to sub-nodes (and posts, depending 
+ * on implementation)
+ * Linearization: Storing Hypercube as paired array of index / non_null_reference 
+ *
+ * See also : T. Zaeschke, C. Zimmerli, M.C. Norrie; 
+ * "The PH-Tree -- A Space-Efficient Storage Structure and Multi-Dimensional Index", 
+ * (SIGMOD 2014)
+ *
+ * @author ztilmann (Tilmann Zaeschke)
+ * 
+ * @param <T> The value type of the tree 
+ *
+ */
+public class PhTree16LD<T> implements PhTree<T> {
+
+	//Enable HC incrementer / iteration
+	public static final boolean HCI_ENABLED = true; 
+	
+	static final int DEPTH_64 = 64;
+	
+	private static final int NO_INSERT_REQUIRED = Integer.MAX_VALUE;
+
+	//Dimension. This is the number of attributes of an entity.
+	private final int dims;
+
+	private int nEntries = 0;
+
+	private Node root = null;
+
+	private final ObjectPool<Node> nodePool;
+	private final ObjectPool<UpdateInfo> uiPool;
+    private final LongArrayPool bitPool;
+    private final BSTPool bstPool;
+
+    Node getRoot() {
+		return root;
+	}
+
+	public PhTree16LD(int dim) {
+		dims = dim;
+		this.nodePool = ObjectPool.create(Node::new);
+		this.uiPool = ObjectPool.create(UpdateInfo::new);
+        this.bitPool = LongArrayPool.create();
+        this.bstPool = BSTPool.create();
+		debugCheck();
+	}
+
+	public PhTree16LD(PhTreeConfig cnf) {
+		this(cnf.getDimActual());
+		if (cnf.getConcurrencyType() != PhTreeConfig.CONCURRENCY_NONE) {
+			throw new UnsupportedOperationException("type= " + cnf.getConcurrencyType());
+		}
+	}
+
+	void increaseNrEntries() {
+		nEntries++;
+	}
+
+	void decreaseNrEntries() {
+		nEntries--;
+	}
+
+	@Override
+	public int size() {
+		return nEntries;
+	}
+
+	@Override
+	public PhTreeStats getStats() {
+		return getStats(0, getRoot(), new PhTreeStats(DEPTH_64));
+	}
+
+	private PhTreeStats getStats(int currentDepth, Node node, PhTreeStats stats) {
+		stats.nNodes++;
+		stats.infixHist[node.getInfixLen()]++;
+		stats.nodeDepthHist[currentDepth]++;
+		int size = node.getEntryCount();
+		stats.nodeSizeLogHist[32-Integer.numberOfLeadingZeros(size)]++;
+
+		currentDepth += node.getInfixLen();
+		stats.q_totalDepth += currentDepth;
+
+		List<BSTEntry> entries = new ArrayList<>();
+		node.getStats(stats, entries);
+		for (BSTEntry child: entries) {
+			if (child.getValue() instanceof Node) {
+				Node sub = (Node) child.getValue();
+				if (sub.getInfixLen() + 1 + sub.getPostLen() != node.getPostLen()) {
+					throw new IllegalStateException();
+				}
+				getStats(currentDepth + 1, sub, stats);
+			} else {
+				stats.q_nPostFixN[currentDepth]++;
+			}
+		}
+		if (entries.size() != node.getEntryCount()) {
+			System.err.println("WARNING: entry count mismatch: a-found/ec=" +
+					entries.size() + "/" + node.getEntryCount());
+		}
+
+		final int REF = 4;//bytes for a reference
+		// this +  value[] + ba[] + ind() + isHC + postLen + infLen + nEntries
+		stats.size += align8(12 + REF + REF + REF + 1 + 1 + 1 + 4);
+		//count children
+		int nChildren = node.getEntryCount();
+		stats.size += 16;
+		if (nChildren == 1 && (node != getRoot()) && nEntries > 1) {
+			//This should not happen! Except for a root node if the tree has <2 entries.
+			System.err.println("WARNING: found lonely node...");
+		}
+		if (nChildren == 0 && (node != getRoot())) {
+			//This should not happen! Except for a root node if the tree has <2 entries.
+			System.err.println("WARNING: found ZOMBIE node...");
+		}
+		if (dims<=31 && node.getEntryCount() > (1L<<dims)) {
+			System.err.println("WARNING: Over-populated node found: ec=" + node.getEntryCount());
+		}
+		stats.nTotalChildren += nChildren;
+
+		return stats;
+	}
+
+	@SuppressWarnings("unchecked")
+	@Override
+	public T put(long[] key, T value) {
+		Object nonNullValue = maskNull(value);
+		if (getRoot() == null) {
+			insertRoot(key, nonNullValue);
+			return null;
+		}
+
+		Object o = getRoot();
+		while (o instanceof Node) {
+			Node currentNode = (Node) o;
+			o = currentNode.doInsertIfMatching(key, nonNullValue, this);
+		}
+		return (T) o;
+    }
+
+    private void insertRoot(long[] key, Object value) {
+        root = Node.createNode(dims, 0, DEPTH_64-1, this);
+        long pos = posInArray(key, root.getPostLen());
+        root.addEntry(pos, key, value, this);
+        increaseNrEntries();
+    }
+
+	@Override
+	public boolean contains(long... key) {
+		Object o = getRoot();
+		while (o instanceof Node) {
+			Node currentNode = (Node) o;
+			o = currentNode.doIfMatching(key, true, null, null, this);
+		}
+		return o != null;
+	}
+
+
+	@SuppressWarnings("unchecked")
+	@Override
+	public T get(long... key) {
+		Object o = getRoot();
+		while (o instanceof Node) {
+			Node currentNode = (Node) o;
+			o = currentNode.doIfMatching(key, true, null, null, this);
+		}
+		return o == PhTreeHelper.NULL ? null : (T) o;
+	}
+
+
+	/**
+	 * A value-set is an object with n=DIM values.
+	 * @param key key to insert
+	 * @return true if the value was found
+	 */
+	@SuppressWarnings("unchecked")
+	@Override
+	public T remove(long... key) {
+		Object o = getRoot();
+		Node parentNode = null;
+		while (o instanceof Node) {
+			Node currentNode = (Node) o;
+			o = currentNode.doIfMatching(key, false, parentNode, null, this);
+			parentNode = currentNode;
+		}
+		return (T) o;
+	}
+
+	public static class UpdateInfo {
+		long[] newKey;
+		int insertRequired = NO_INSERT_REQUIRED;
+		UpdateInfo init(long[] newKey) {
+			this.newKey = newKey;
+			return this;
+		}
+	}
+
+	@SuppressWarnings("unchecked")
+	@Override
+	public T update(long[] oldKey, long[] newKey) {
+		Node[] stack = new Node[64];
+		int stackSize = 0;
+
+		Object o = getRoot();
+		Node parentNode = null;
+		final UpdateInfo ui = uiPool.get().init(newKey);
+
+		while (o instanceof Node) {
+			Node currentNode = (Node) o;
+			stack[stackSize++] = currentNode;
+			o = currentNode.doIfMatching(oldKey, false, parentNode, ui, this);
+			parentNode = currentNode;
+		}
+
+		Object value = o == PhTreeHelper.NULL ? null : o;
+
+		//traverse the tree from bottom to top
+		//this avoids extracting and checking infixes.
+		if (ui.insertRequired != NO_INSERT_REQUIRED) {
+			//ignore lowest node, except if it is the root node
+			if (stack[stackSize-1].getEntryCount() == 0 && stackSize > 1) {
+				//The node may have been deleted
+				stackSize--;
+			}
+			while (stackSize > 0) {
+				if (stack[--stackSize].getPostLen()+1 >= ui.insertRequired) {
+					o = stack[stackSize];
+					while (o instanceof Node) {
+						Node currentNode = (Node) o;
+						o = currentNode.doInsertIfMatching(newKey, value, this);
+					}
+					ui.insertRequired = NO_INSERT_REQUIRED;
+					break;
+				}
+			}
+		}
+		uiPool.offer(ui);
+		return (T) value;
+	}
+
+
+	// Overrides of new  Java 8 methods
+
+	@Override
+	public T getOrDefault(long[] key, T defaultValue) {
+		T e = get(key);
+		return e == null ? defaultValue : e;
+	}
+
+	@Override
+	public T putIfAbsent(long[] key, T value) {
+		if (getRoot() == null) {
+			insertRoot(key, maskNull(value));
+			return null;
+		}
+
+		Object o = getRoot();
+		while (true) {
+			Node currentNode = (Node) o;
+			long hcPos = posInArray(key, currentNode.getPostLen());
+			BSTEntry e = currentNode.getEntry(hcPos, key);
+			if (e == null) {
+				increaseNrEntries();
+				currentNode.addEntry(hcPos, key, maskNull(value), this);
+				return null;
+			}
+			o = e.getValue();
+			if (!(o instanceof Node)) {
+				return unmaskNull(o);
+			}
+		}
+	}
+
+	@Override
+	public boolean remove(long[] key, T value) {
+		boolean[] o = new boolean[1];
+		computeIfPresent(key, (longs, t) -> (o[0] = Objects.equals(t, value)) ? null : t);
+		return o[0];
+	}
+
+	@Override
+	public boolean replace(long[] key, T oldValue, T newValue) {
+		if (getRoot() == null) {
+			return false;
+		}
+
+		Object o = getRoot();
+		while (true) {
+			Node currentNode = (Node) o;
+			long hcPos = posInArray(key, currentNode.getPostLen());
+			BSTEntry e = currentNode.getEntry(hcPos, key);
+			if (e == null) {
+				return false;
+			}
+			o = e.getValue();
+			if (!(o instanceof Node)) {
+				if (Objects.equals(maskNull(oldValue), o)) {
+					e.setValue(maskNull(newValue));
+					return true;
+				}
+				return false;
+			}
+		}
+	}
+
+	@Override
+	public T replace(long[] key, T value) {
+		if (getRoot() == null) {
+			return null;
+		}
+
+		Object o = getRoot();
+		while (true) {
+			Node currentNode = (Node) o;
+			long hcPos = posInArray(key, currentNode.getPostLen());
+			BSTEntry e = currentNode.getEntry(hcPos, key);
+			if (e == null) {
+				return null;
+			}
+			o = e.getValue();
+			if (!(o instanceof Node)) {
+				e.setValue(maskNull(value));
+				return unmaskNull(o);
+			}
+		}
+	}
+
+	@Override
+	public T computeIfAbsent(long[] key, Function<long[], ? extends T> mappingFunction) {
+		if (getRoot() == null) {
+			T newValue = mappingFunction.apply(key);
+			if (newValue != null) {
+				insertRoot(key, maskNull(newValue));
+			}
+			return newValue;
+		}
+
+		Object o = getRoot();
+		while (true) {
+			Node currentNode = (Node) o;
+			long hcPos = posInArray(key, currentNode.getPostLen());
+			BSTEntry e = currentNode.getEntry(hcPos, key);
+			if (e == null) {
+				T newValue = mappingFunction.apply(key);
+				if (newValue != null) {
+					increaseNrEntries();
+					currentNode.addEntry(hcPos, key, maskNull(newValue), this);
+				}
+				return newValue;
+			}
+			o = e.getValue();
+			if (!(o instanceof Node)) {
+				return unmaskNull(o);
+			}
+		}
+	}
+
+	@SuppressWarnings("unchecked")
+	@Override
+	public T computeIfPresent(long[] key, BiFunction<long[], ? super T, ? extends T> remappingFunction) {
+		if (getRoot() == null) {
+			return null;
+		}
+
+		Object o = getRoot();
+		Node parentNode = null;
+		while (o instanceof Node) {
+			Node currentNode = (Node) o;
+			long hcPos = posInArray(key, currentNode.getPostLen());
+			o = currentNode.computeEntry(hcPos, key, parentNode, this, false, remappingFunction);
+			parentNode = currentNode;
+			// Node: recurse
+			// Otherwise: return value
+		}
+		return (T) o;
+	}
+
+	@SuppressWarnings("unchecked")
+	@Override
+	public T compute(long[] key, BiFunction<long[], ? super T, ? extends T> remappingFunction) {
+		if (getRoot() == null) {
+			T newValue = remappingFunction.apply(key, null);
+			if (newValue != null) {
+				insertRoot(key, maskNull(newValue));
+			}
+			return newValue;
+		}
+
+		Object o = getRoot();
+		Node parentNode = null;
+		while (o instanceof Node) {
+			Node currentNode = (Node) o;
+			long hcPos = posInArray(key, currentNode.getPostLen());
+			o = currentNode.computeEntry(hcPos, key, parentNode, this, true, remappingFunction);
+			parentNode = currentNode;
+            // Node: recurse
+            // Otherwise: return value
+		}
+		return (T) o;
+	}
+
+
+	@Override
+	public String toString() {
+		return this.getClass().getSimpleName() +
+				" HCI-on=" + HCI_ENABLED +
+				" DEBUG=" + PhTreeHelper.DEBUG;
+	}
+
+	@Override
+	public String toStringPlain() {
+		StringBuilderLn sb = new StringBuilderLn();
+		if (getRoot() != null) {
+			toStringPlain(sb, getRoot());
+		}
+		return sb.toString();
+	}
+
+	private void toStringPlain(StringBuilderLn sb, Node node) {
+		BSTIteratorAll iter = node.iterator();
+		while (iter.hasNextEntry()) {
+			BSTEntry o = iter.nextEntry();
+			//inner node?
+			if (o.getValue() instanceof Node) {
+				toStringPlain(sb, (Node) o.getValue());
+			} else {
+				sb.append(Bits.toBinary(o.getKdKey(), DEPTH_64));
+				sb.appendLn("  v=" + o.getValue());
+			}
+		}
+	}
+
+
+	@Override
+	public String toStringTree() {
+		StringBuilderLn sb = new StringBuilderLn();
+		if (getRoot() != null) {
+			toStringTree(sb, 0, getRoot(), new long[dims], true);
+		}
+		return sb.toString();
+	}
+
+	private void toStringTree(StringBuilderLn sb, int currentDepth, Node node, long[] prefix, boolean printValue) {
+		String ind = "*";
+		for (int i = 0; i < currentDepth; i++) {
+			ind += "-";
+		}
+		sb.append( ind + "il=" + node.getInfixLen() + " pl=" + (node.getPostLen()) +
+				" ec=" + node.getEntryCount() + " inf=[");
+
+		//for a leaf node, the existence of a sub just indicates that the value exists.
+		if (node.getInfixLen() > 0) {
+			long mask = (-1L) << node.getInfixLen();
+			mask = ~mask;
+			mask <<= node.getPostLen()+1;
+			for (int i = 0; i < dims; i++) {
+				sb.append(Bits.toBinary(prefix[i] & mask) + ",");
+			}
+		}
+		currentDepth += node.getInfixLen();
+		sb.appendLn("]  " + node);
+
+		//To clean previous postfixes.
+		BSTIteratorAll iter = node.iterator();
+		while (iter.hasNextEntry()) {
+			BSTEntry o = iter.nextEntry();
+			if (o.getValue() instanceof Node) {
+				sb.appendLn(ind + "# " + o.getKey() + "  +");
+				toStringTree(sb, currentDepth + 1, (Node) o.getValue(), o.getKdKey(), printValue);
+			}  else {
+				//post-fix
+				sb.append(ind + Bits.toBinary(o.getKdKey(), DEPTH_64));
+				sb.append("  hcPos=" + o.getKey());
+				if (printValue) {
+					sb.append("  v=" + o.getValue());
+				}
+				sb.appendLn("");
+			}
+		}
+	}
+
+
+	@Override
+	public PhExtent<T> queryExtent() {
+		return new PhIteratorFullNoGC<>(this, null).reset();
+	}
+
+
+	/**
+	 * Performs a rectangular window query. The parameters are the min and max keys which
+	 * contain the minimum respectively the maximum keys in every dimension.
+	 * @param min Minimum values
+	 * @param max Maximum values
+	 * @return Result iterator.
+	 */
+	@Override
+	public PhQuery<T> query(long[] min, long[] max) {
+		if (min.length != dims || max.length != dims) {
+			throw new IllegalArgumentException("Invalid number of arguments: " + min.length +
+					" / " + max.length + "  DIM=" + dims);
+		}
+		PhQuery<T> q = new PhIteratorNoGC<>(this, null);
+		q.reset(min, max);
+		return q;
+	}
+
+	/**
+	 * Performs a rectangular window query. The parameters are the min and max keys which
+	 * contain the minimum respectively the maximum keys in every dimension.
+	 * @param min Minimum values
+	 * @param max Maximum values
+	 * @return Result list.
+	 */
+	@Override
+	public List<PhEntry<T>> queryAll(long[] min, long[] max) {
+		return queryAll(min, max, Integer.MAX_VALUE, null, PhMapper.PVENTRY());
+	}
+
+	/**
+	 * Performs a rectangular window query. The parameters are the min and max keys which
+	 * contain the minimum respectively the maximum keys in every dimension.
+	 * @param min Minimum values
+	 * @param max Maximum values
+	 * @return Result list.
+	 */
+	@Override
+	public <R> List<R> queryAll(long[] min, long[] max, int maxResults,
+			PhFilter filter, PhMapper<T, R> mapper) {
+		if (min.length != dims || max.length != dims) {
+			throw new IllegalArgumentException("Invalid number of arguments: " + min.length +
+					" / " + max.length + "  DIM=" + dims);
+		}
+
+		if (getRoot() == null) {
+			return new ArrayList<>();
+		}
+
+//		if (mapper == null) {
+//			mapper = (PhMapper<T, R>) PhMapper.PVENTRY();
+//		}
+
+		if (filter == null) {
+			PhFilterWindow wf = new PhFilterWindow();
+			wf.set(min, max);
+			filter = wf;
+		}
+
+		PhResultList<T, R> list = new PhResultList.MappingResultList<>(filter, mapper,
+				() -> new PhEntry<>(new long[dims], null));
+
+		NodeIteratorListReuse<T, R> it = new NodeIteratorListReuse<>(list);
+		return it.resetAndRun(getRoot(), min, max, maxResults);
+	}
+
+	@Override
+	public int getDim() {
+		return dims;
+	}
+
+	@Override
+	public int getBitDepth() {
+		return PhTree16LD.DEPTH_64;
+	}
+
+	/**
+	 * Locate nearest neighbors for a given point in space.
+	 * @param nMin number of values to be returned. More values may or may not be returned when
+	 * several have	the same distance.
+	 * @param v center point
+	 * @return Result iterator.
+	 */
+	@Override
+	public PhKnnQuery<T> nearestNeighbour(int nMin, long... v) {
+		return new PhQueryKnnHS<>(this).reset(nMin, PhDistanceL.THIS, v);
+		//return new PhQueryKnnHSZ<T>(this).reset(nMin, PhDistanceL.THIS, v);
+	}
+
+	@Override
+	public PhKnnQuery<T> nearestNeighbour(int nMin, PhDistance dist,
+			PhFilter dimsFilter, long... center) {
+		return new PhQueryKnnHS<>(this).reset(nMin, dist, center);
+		//return new PhQueryKnnHSZ<T>(this).reset(nMin, dist, center);
+	}
+
+	@Override
+	public PhRangeQuery<T> rangeQuery(double dist, long... center) {
+		return rangeQuery(dist, null, center);
+	}
+
+	@Override
+	public PhRangeQuery<T> rangeQuery(double dist, PhDistance optionalDist, long...center) {
+		PhFilterDistance filter = new PhFilterDistance();
+		if (optionalDist == null) {
+			optionalDist = PhDistanceL.THIS;
+		}
+		filter.set(center, optionalDist, dist);
+		PhQuery<T> q = new PhIteratorNoGC<>(this, filter);
+		PhRangeQuery<T> qr = new PhRangeQuery<>(q, this, optionalDist, filter);
+		qr.reset(dist, center);
+		return qr;
+	}
+
+	/**
+	 * Remove all entries from the tree.
+	 */
+	@Override
+	public void clear() {
+		root = null;
+		nEntries = 0;
+	}
+
+    ObjectPool<Node> nodePool() {
+        return nodePool;
+    }
+
+    public LongArrayPool longPool() {
+        return bitPool;
+    }
+
+    public BSTPool bstPool() {
+        return bstPool;
+    }
+}
