@@ -20,19 +20,17 @@ package ch.ethz.globis.phtree.v16ld.bst;
 
 import ch.ethz.globis.phtree.PhTreeHelper;
 import ch.ethz.globis.phtree.util.StringBuilderLn;
+import ch.ethz.globis.phtree.v16ld.Node;
 import ch.ethz.globis.phtree.v16ld.Node.BSTEntry;
 import ch.ethz.globis.phtree.v16ld.Node.BSTStats;
 import ch.ethz.globis.phtree.v16ld.Node.REMOVE_OP;
-import ch.ethz.globis.phtree.v16ld.Node;
 import ch.ethz.globis.phtree.v16ld.PhTree16LD;
-
-import static ch.ethz.globis.phtree.PhTreeHelper.posInArray;
 
 import java.util.Arrays;
 import java.util.function.BiFunction;
 
 
-public class BSTreePage {
+public class BSTreePageLHC {
 
 	private static final int INITIAL_PAGE_SIZE = 4;
 
@@ -43,21 +41,17 @@ public class BSTreePage {
 	private final PhTree16LD<?> tree;
 
 
-	BSTreePage(PhTree16LD<?> tree) {
+
+	BSTreePageLHC(PhTree16LD<?> tree) {
 	    this.tree = tree;
 		init(tree.getDim());
 	}
-
+	
 	void init(int dims) {
 		nEntries = 0;
-		int initialPageSize;
-		if (isAHC()) {
-			initialPageSize = 1 << dims;
-		} else {
-			//TODO other intitial page size?
-			initialPageSize = (1 << dims) <= 8 ? 2 : INITIAL_PAGE_SIZE;
-			keys = tree.bstPool().arrayCreateLong(initialPageSize);
-		}
+		//TODO other intitial page size?
+		int initialPageSize = (1 << dims) <= 8 ? 2 : INITIAL_PAGE_SIZE;
+		keys = tree.bstPool().arrayCreateLong(initialPageSize);
 		values = tree.bstPool().arrayCreateEntries(initialPageSize);
 		Node.statNLeaves++;
 	}
@@ -66,34 +60,15 @@ public class BSTreePage {
 		if (nEntries > 0) {
 			throw new IllegalStateException("nEntries=" + nEntries);
 		}
-		
-		if (isAHC()) {
-			int pos1 = e1.getKey();
-			int pos2 = e2.getKey();
-			values[pos1] = e1;
-			values[pos2] = e2;
-		} else {
-	        if (e1.getKey() < e2.getKey()) {
-				values[0] = e1;
-				keys[0] = e1.getKey();
-				values[1] = e2;
-				keys[1] = e2.getKey();
-	        } else {
-				values[0] = e2;
-				keys[0] = e2.getKey();
-				values[1] = e1;
-				keys[1] = e1.getKey();
-	        }
-		}
+		values[0] = e1;
+		keys[0] = e1.getKey();
+		values[1] = e2;
+		keys[1] = e2.getKey();
 		nEntries = 2;
 	}
 
 	public static BSTreePage create(PhTree16LD<?> tree) {
 		return tree.bstPool().getNode(tree);
-	}
-
-	boolean isAHC() {
-		return true;
 	}
 
 	public BSTEntry getValueFromLeaf(long key) {
@@ -103,14 +78,10 @@ public class BSTreePage {
 
 	/**
 	 * Binary search.
-	 *
+	 * 
 	 * @param key search key
 	 */
 	int binarySearch(long key) {
-		if (isAHC()) {
-			int pos = (int) key;
-			return values[pos] != null ? pos : -(pos+1);
-		}
 		if (nEntries <=8) {
 			return linearSearch(key);
 		}
@@ -120,15 +91,15 @@ public class BSTreePage {
 
 		while (low <= high) {
 			int mid = (low + high) >>> 1;
-			long midVal = keys[mid];
+        	long midVal = keys[mid];
 
-			if (midVal < key)
-				low = mid + 1;
-			else if (midVal > key)
-				high = mid - 1;
-			else {
-				return mid; // key found
-			}
+        	if (midVal < key)
+        		low = mid + 1;
+        	else if (midVal > key)
+        		high = mid - 1;
+        	else {
+       			return mid; // key found
+        	}
 		}
 		return -(low + 1);  // key not found.
 	}
@@ -144,12 +115,10 @@ public class BSTreePage {
 	}
 
 	private void ensureSizePlusOne(Node ind) {
-		if (!isAHC()) {
-			if (nEntries + 1 > keys.length) {
-				int newLen = keys.length * 2; //TODO  > ind.maxLeafN() ? ind.maxLeafN() : keys.length*2;
-				keys = tree.bstPool().arrayExpand(keys, newLen);
-				values = tree.bstPool().arrayExpand(values, newLen);
-			}
+		if (nEntries + 1 > keys.length) {
+			int newLen = keys.length*2; //TODO  > ind.maxLeafN() ? ind.maxLeafN() : keys.length*2;
+			keys = tree.bstPool().arrayExpand(keys, newLen);
+			values = tree.bstPool().arrayExpand(values, newLen);
 		}
 	}
 
@@ -168,18 +137,13 @@ public class BSTreePage {
 
 		BSTEntry entry = tree.bstPool().getEntry();
 		entry.set(key, null, null);
-		if (!isAHC()) {
-			pos = -(pos + 1);
-			this.ensureSizePlusOne(ind);
-			if (pos < nEntries) {
-				System.arraycopy(keys, pos, keys, pos + 1, nEntries - pos);
-				System.arraycopy(values, pos, values, pos + 1, nEntries - pos);
-			}
-			keys[pos] = key;
-			values[pos] = entry;
-		} else {
-			values[key] = entry;
+		pos = -(pos+1);
+		if (pos < nEntries) {
+			System.arraycopy(keys, pos, keys, pos+1, nEntries-pos);
+			System.arraycopy(values, pos, values, pos+1, nEntries-pos);
 		}
+		keys[pos] = key;
+		values[pos] = entry;
 		nEntries++;
 		ind.incEntryCount();
 		return entry;
@@ -211,12 +175,8 @@ public class BSTreePage {
 		REMOVE_OP op = node.bstInternalRemoveCallback(prevValue, kdKey, ui);
 		switch (op) {
 			case REMOVE_RETURN:
-				if (isAHC()) {
-					values[i] = null;
-				} else {
-					System.arraycopy(keys, i + 1, keys, i, nEntries - i - 1);
-					System.arraycopy(values, i + 1, values, i, nEntries - i - 1);
-				}
+				System.arraycopy(keys, i+1, keys, i, nEntries-i-1);
+				System.arraycopy(values, i+1, values, i, nEntries-i-1);
 				nEntries--;
 				node.decEntryCount();
 				return prevValue;
@@ -304,13 +264,8 @@ public class BSTreePage {
 	}
 
 	private void removeForCompute(int pos, Node node) {
-		if (isAHC()) {
-			values[pos] = null;
-			//TODO return entry to pool????
-		} else {
-			System.arraycopy(keys, pos + 1, keys, pos, nEntries - pos - 1);
-			System.arraycopy(values, pos + 1, values, pos, nEntries - pos - 1);
-		}
+		System.arraycopy(keys, pos+1, keys, pos, nEntries-pos-1);
+		System.arraycopy(values, pos+1, values, pos, nEntries-pos-1);
 		nEntries--;
 		node.decEntryCountGlobal(tree);
 	}
@@ -340,23 +295,11 @@ public class BSTreePage {
 	public void getStats(BSTStats stats) {
 		stats.nNodesLeaf++;
 		stats.nEntriesLeaf += nEntries;
-		if (isAHC()) {
-			stats.capacityLeaf += values.length;
-		} else {
-			stats.capacityLeaf += keys.length;
-		}
+		stats.capacityLeaf += keys.length;
 	}
 
 	public BSTEntry getFirstValue() {
-		if (!isAHC()) {
-			return values[0];
-		}
-		for (int i = 0; i < values.length; i++) {
-			if (values[i] != null) {
-				return values[i];
-			}
-		}
-		throw new IllegalStateException();
+		return values[0];
 	}
 
 	void nullify() {

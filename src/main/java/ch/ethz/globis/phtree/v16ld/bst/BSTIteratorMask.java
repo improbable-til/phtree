@@ -22,6 +22,7 @@ public class BSTIteratorMask {
 	private long minMask;
 	private long maxMask;
 	private BSTEntry nextValue;
+	private int nFound = 0;
  	
 	public BSTIteratorMask() {
 		//nothing
@@ -31,7 +32,12 @@ public class BSTIteratorMask {
 		this.minMask = minMask;
 		this.maxMask = maxMask;
 		this.currentPage = root;
-		this.currentPos = 0;
+		if (root.isAHC()) {
+			this.currentPos = (int) minMask;
+		} else {
+			this.currentPos = 0;
+		}
+		this.nFound = 0;
 
 		//special optimization if only one quadrant matches
 		if (nEntries > 4 && Long.bitCount(minMask ^ maxMask) == 0) {
@@ -50,23 +56,44 @@ public class BSTIteratorMask {
 	}
 
 	private void findNext() {
-		while (currentPage != null) {
-		    int nKeys = currentPage.getNKeys();
-		    long[] keys = currentPage.getKeys();
-		    while (currentPos < nKeys) {
-				long key = keys[currentPos]; 
-		        if (check(key)) {
+		if (currentPage.isAHC()) {
+			int nValues = currentPage.getNKeys();
+			BSTEntry[] values = currentPage.getValues();
+			while (currentPos < values.length && nFound < nValues) {
+				BSTEntry v = values[currentPos];
+				if (v != null) {
+					nFound++;
+					int key = v.getKey();
+					if (check(key)) {
+						nextValue = v;
+						currentPos++;
+						return;
+					} else if (key > maxMask) {
+						currentPage = null;
+						return;
+					}
+				}
+				currentPos++;
+			}
+			currentPage = null;
+			currentPos = 0;
+		} else {
+			int nKeys = currentPage.getNKeys();
+			long[] keys = currentPage.getKeys();
+			while (currentPos < nKeys) {
+				long key = keys[currentPos];
+				if (check(key)) {
 					nextValue = currentPage.getValues()[currentPos];
-			        currentPos++;
-		            return;
+					currentPos++;
+					return;
 				} else if (key > maxMask) {
 					currentPage = null;
 					return;
-		        }
-		        currentPos++;
-		    }
-		    currentPage = null;
-		    currentPos = 0;
+				}
+				currentPos++;
+			}
+			currentPage = null;
+			currentPos = 0;
 		}
 	}
 	

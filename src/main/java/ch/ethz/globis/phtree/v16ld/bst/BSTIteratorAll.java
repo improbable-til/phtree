@@ -21,6 +21,7 @@ public class BSTIteratorAll {
 	private BSTreePage currentPage;
 	private int currentPos;
 	private BSTEntry nextValue;
+	private int nFound = 0;
 	
 	public BSTIteratorAll() {
 		//nothing
@@ -29,22 +30,34 @@ public class BSTIteratorAll {
 	public BSTIteratorAll reset(BSTreePage root) {
 		this.currentPage = root;
 		this.currentPos = 0;
+		this.nFound = 0;
 		findNext();
 		return this;
 	}
 
 	private void findNext() {
-		while (currentPage != null ) {
-			//first progress to next page, if necessary.
+		if (currentPage.isAHC()) {
+			int nValues = currentPage.getNKeys();
+			BSTEntry[] values = currentPage.getValues();
+			while (currentPos < values.length && nFound < nValues) {
+				BSTEntry v = values[currentPos];
+				currentPos++;
+				if (v != null) {
+					nFound++;
+					nextValue = v;
+					return;
+				}
+			}
+			currentPage = null;
+			currentPos = 0;
+		} else {
 			if (currentPos >= currentPage.getNKeys()) {
 				currentPage = null;
 				currentPos = 0;
-				continue;
+			} else {
+				nextValue = currentPage.getValues()[currentPos];
+				currentPos++;
 			}
-
-			nextValue = currentPage.getValues()[currentPos];
-			currentPos++;
-			return;
 		}
 	}
 	

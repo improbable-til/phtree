@@ -218,7 +218,7 @@ public class PhTree16LD<T> implements PhTree<T> {
 
     private void insertRoot(long[] key, Object value) {
         root = Node.createNode(dims, 0, DEPTH_64-1, this);
-        long pos = posInArray(key, root.getPostLen());
+        int pos = Node.toInt(posInArray(key, root.getPostLen()));
         root.addEntry(pos, key, value, this);
         increaseNrEntries();
     }
@@ -335,7 +335,7 @@ public class PhTree16LD<T> implements PhTree<T> {
 		Object o = getRoot();
 		while (true) {
 			Node currentNode = (Node) o;
-			long hcPos = posInArray(key, currentNode.getPostLen());
+			int hcPos = Node.toInt(posInArray(key, currentNode.getPostLen()));
 			BSTEntry e = currentNode.getEntry(hcPos, key);
 			if (e == null) {
 				increaseNrEntries();
@@ -416,7 +416,7 @@ public class PhTree16LD<T> implements PhTree<T> {
 		Object o = getRoot();
 		while (true) {
 			Node currentNode = (Node) o;
-			long hcPos = posInArray(key, currentNode.getPostLen());
+			int hcPos = Node.toInt(posInArray(key, currentNode.getPostLen()));
 			BSTEntry e = currentNode.getEntry(hcPos, key);
 			if (e == null) {
 				T newValue = mappingFunction.apply(key);

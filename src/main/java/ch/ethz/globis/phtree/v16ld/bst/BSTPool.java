@@ -22,7 +22,6 @@ import ch.ethz.globis.phtree.util.unsynced.LongArrayPool;
 import ch.ethz.globis.phtree.util.unsynced.ObjectArrayPool;
 import ch.ethz.globis.phtree.util.unsynced.ObjectPool;
 import ch.ethz.globis.phtree.v16ld.Node.BSTEntry;
-import ch.ethz.globis.phtree.v16ld.Node;
 import ch.ethz.globis.phtree.v16ld.PhTree16LD;
 
 public class BSTPool {
@@ -87,7 +86,9 @@ public class BSTPool {
 	}
 
 	public void reportFreeNode(BSTreePage p) {
-		keyPool.offer(p.getKeys());
+		if (!p.isAHC()) {
+			keyPool.offer(p.getKeys());
+		}
 		entryArrayPool.offer(p.getValues());
 		p.nullify();
 		pagePool.offer(p);

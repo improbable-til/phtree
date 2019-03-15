@@ -54,7 +54,7 @@ public class Node {
 	//Nested tree index
 	private BSTreePage root;
 
-	
+
     Node() {
 		// For pooling only
 	}
@@ -89,7 +89,7 @@ public class Node {
 	 * @return The sub node or null.
 	 */
 	Object doInsertIfMatching(long[] keyToMatch, Object newValueToInsert, PhTree16LD<?> tree) {
-		long hcPos = posInArray(keyToMatch, getPostLen());
+		int hcPos = toInt(posInArray(keyToMatch, getPostLen()));
 
 		//ntPut will also increase the node-entry count
 		Object v = addEntry(hcPos, keyToMatch, newValueToInsert, tree);
@@ -150,15 +150,11 @@ public class Node {
         int newPostLen = mcb - 1;
         Node newNode = createNode(key1.length, newLocalInfLen, newPostLen, tree);
 
-		long posSub1 = posInArray(key1, newPostLen);
-        long posSub2 = posInArray(key2, newPostLen);
+		int posSub1 = toInt(posInArray(key1, newPostLen));
+        int posSub2 = toInt(posInArray(key2, newPostLen));
 		BSTEntry e1 = newNode.createEntry(posSub1, key1, val1, tree);
 		BSTEntry e2 = newNode.createEntry(posSub2, key2, val2, tree);
-        if (posSub1 < posSub2) {
-        	newNode.root.init(e1, e2);
-        } else {
-			newNode.root.init(e2, e1);
-        }
+       	newNode.root.init(e1, e2);
         newNode.entryCnt = 2;
         return newNode;
     }
@@ -171,7 +167,7 @@ public class Node {
 	 * @param newKey new key
 	 * @param value new value
 	 */
-	private BSTEntry createEntry(long hcPos, long[] newKey, Object value, PhTree16LD<?> tree) {
+	private BSTEntry createEntry(int hcPos, long[] newKey, Object value, PhTree16LD<?> tree) {
 		if (value instanceof Node) {
 			Node node = (Node) value;
 			int newSubInfixLen = postLenStored() - node.postLenStored() - 1;
@@ -231,7 +227,7 @@ public class Node {
 		//We know that there is only a leaf node with only a single entry, so...
 		BSTEntry nte = root.getFirstValue();
 		
-		long posInParent = PhTreeHelper.posInArray(key, parent.getPostLen());
+		int posInParent = toInt(PhTreeHelper.posInArray(key, parent.getPostLen()));
 		if (nte.getValue() instanceof Node) {
 			long[] newPost = nte.getKdKey();
 			//connect sub to parent
@@ -254,7 +250,10 @@ public class Node {
 		discardNode(tree);
 	}
 
-	
+	static int toInt(long hcPos) {
+		return (int) hcPos;
+	}
+
 	private static int N_GOOD = 0;
 	private static int N = 0;
 	
@@ -388,33 +387,24 @@ public class Node {
 	public static int statNInner = 0;
 	
 	private BSTreePage bstCreateRoot(PhTree16LD<?> tree) {
-
 		//bootstrap index
 		return bstCreatePage(tree);
 	}
 
 
     public final BSTEntry bstGetOrCreate(long key, PhTree16LD<?> tree) {
-        BSTreePage page = getRoot();
-		BSTEntry e = page.getOrCreate(key, this);
-		if (e.getKdKey() == null && e.getValue() instanceof BSTreePage) {
-			BSTreePage newPage = (BSTreePage) e.getValue();
-			root = BSTreePage.create(tree);
-			e.setValue(null);
-		}
-		return e;
+        return getRoot().getOrCreate(toInt(key), this);
 	}
 
 
     public BSTEntry bstRemove(long key, long[] kdKey, UpdateInfo ui, PhTree16LD<?> tree) {
-		final BSTreePage rootPage = getRoot();
-		return rootPage.remove(key, kdKey, this, ui);
+		return getRoot().remove(key, kdKey, this, ui);
 	}
 
 
     public <T> Object bstCompute(long key, long[] kdKey, boolean doIfAbsent,
 								 BiFunction<long[], ? super T, ? extends T> mappingFunction) {
-		return getRoot().computeLeaf(key, kdKey, this, doIfAbsent, mappingFunction);
+		return getRoot().computeLeaf(toInt(key), kdKey, this, doIfAbsent, mappingFunction);
     }
 
 
@@ -488,7 +478,7 @@ public class Node {
 	 * @param value value
 	 * @return see above
 	 */
-	Object addEntry(long hcPos, long[] kdKey, Object value, PhTree16LD<?> tree) {
+	Object addEntry(int hcPos, long[] kdKey, Object value, PhTree16LD<?> tree) {
 		//Uses bstGetOrCreate() -> 
 		//- get or create entry
 		//- if value==null -> new entry, just set key,value
@@ -557,7 +547,7 @@ public class Node {
         return null;
 	}
 	
-	private void replaceEntry(long hcPos, long[] kdKey, Object value) {
+	private void replaceEntry(int hcPos, long[] kdKey, Object value) {
 		BSTEntry be = bstGet(hcPos);
 		be.set(hcPos, kdKey, value);
 	}
@@ -710,11 +700,11 @@ public class Node {
 	}
 
     public static class BSTEntry {
-        private long key;
+        private int key;
         private long[] kdKey;
         private Object value;
 
-        public BSTEntry(long key, long[] k, Object v) {
+        public BSTEntry(int key, long[] k, Object v) {
             this.key = key;
             kdKey = k;
             value = v;
@@ -724,7 +714,7 @@ public class Node {
             //for pool
         }
 
-        public long getKey() {
+        public int getKey() {
             return key;
         }
 
@@ -736,7 +726,7 @@ public class Node {
             return value;
         }
 
-        public void set(long key, long[] kdKey, Object value) {
+        public void set(int key, long[] kdKey, Object value) {
             this.key = key;
             this.kdKey = kdKey;
             this.value = value;
